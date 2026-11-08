@@ -11,7 +11,7 @@
 
 ## 循环触发
 
-`scripts/repeat-report-egress-ip.sh` 用来一次次启动 `report-egress-ip`：每次等出口 IP 写入记录页（或这次 Action 成功结束）后再启动下一次。接口请求带超时，避免一直卡住。
+`scripts/repeat-report-egress-ip.sh` 用来一次次启动 `report-egress-ip`：每次等我们自己的记录页出现新记录后再启动下一次，不靠 GitHub 运行列表来判断结束。接口请求带短超时，避免一直卡住。
 
 需要环境变量 `GH_TOKEN`（对 mutedtowel 仓库有 Actions 权限的 token）。不要把 token 写进仓库。
 
