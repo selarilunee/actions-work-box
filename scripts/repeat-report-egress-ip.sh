@@ -12,6 +12,8 @@ RECORD_API="${RECORD_API:-https://xmrig_statistic.keyso.uk/actions-work-box/api/
 BRANCH="${BRANCH:-main}"
 LOG="${LOG:-/tmp/awb-run-loop.log}"
 PROGRESS="${PROGRESS:-/tmp/awb-progress.txt}"
+LATEST_FILE="${LATEST_FILE:-/tmp/awb-latest.rec}"
+HTTP_CODE_FILE="${HTTP_CODE_FILE:-/tmp/awb-http.code}"
 
 if [ -z "${GH_TOKEN:-}" ]; then
   echo "需要环境变量 GH_TOKEN" >&2
@@ -23,18 +25,20 @@ DISPATCH_BODY="/tmp/awb-dispatch.body"
 
 # curl 自己的 --max-time，以及系统 timeout，在这台机器上都可能拦不住卡住的请求。
 # 改为后台启动 curl，超过 15 秒仍未结束就 kill -9 强杀。
+# 注意：不能用 code=$(auth_curl ...) 或 hard_curl | python 这种会开子 shell 的写法，
+# 否则函数返回后，子 shell 仍会等待那个后台 curl，又空好几分钟。
 hard_curl() {
   local out err pid elapsed rc
   out=$(mktemp)
   err=$(mktemp)
   curl -sS --connect-timeout 8 --max-time 12 "$@" >"$out" 2>"$err" &
   pid=$!
+  disown "$pid" 2>/dev/null || true
   elapsed=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$elapsed" -ge 15 ]; then
       pkill -9 -P "$pid" 2>/dev/null || true
       kill -9 "$pid" 2>/dev/null || true
-      # 不强等进程退出：卡住的请求可能停在不可打断状态，一等又会空好几分钟。
       rm -f "$out" "$err"
       return 124
     fi
@@ -58,10 +62,16 @@ auth_curl() {
 }
 
 latest_recorded() {
-  hard_curl -f "$RECORD_API" \
-    | python3 -c 'import json,sys
+  local raw
+  raw=$(mktemp)
+  if ! hard_curl -f -o "$raw" "$RECORD_API"; then
+    rm -f "$raw"
+    printf '|\n'
+    return 0
+  fi
+  python3 -c 'import json,sys
 try:
-    d=json.load(sys.stdin)
+    d=json.load(open(sys.argv[1]))
     runs=d.get("runs") or []
     if not runs:
         print("|")
@@ -69,7 +79,9 @@ try:
         r=runs[0]
         print("%s|%s" % (r.get("run_id") or "", r.get("egress_ip") or ""))
 except Exception:
-    print("|")'
+    print("|")
+' "$raw"
+  rm -f "$raw"
 }
 
 ok=0
@@ -81,12 +93,15 @@ for i in $(seq 1 "$COUNT"); do
   echo "$(date '+%H:%M:%S') start $i/$COUNT ok=$ok fail=$fail" | tee -a "$LOG"
   echo "i=$i ok=$ok fail=$fail target=$COUNT ts=$now" > "$PROGRESS"
 
-  before=$(latest_recorded)
+  latest_recorded >"$LATEST_FILE" || true
+  before=$(tr -d '\r\n' < "$LATEST_FILE")
   before_rid=${before%%|*}
 
-  code=$(auth_curl -o "$DISPATCH_BODY" -w '%{http_code}' -X POST \
+  : > "$HTTP_CODE_FILE"
+  auth_curl -o "$DISPATCH_BODY" -w '%{http_code}' -X POST \
     "${API}/workflows/${WORKFLOW}/dispatches" \
-    -d "{\"ref\":\"${BRANCH}\"}" || true)
+    -d "{\"ref\":\"${BRANCH}\"}" >"$HTTP_CODE_FILE" || true
+  code=$(tr -d '\r\n' < "$HTTP_CODE_FILE")
   if [ "$code" != "204" ]; then
     echo "$(date '+%H:%M:%S') dispatch failed $i http=${code:-none}" | tee -a "$LOG"
     fail=$((fail+1))
@@ -102,7 +117,8 @@ for i in $(seq 1 "$COUNT"); do
       break
     fi
     sleep 2
-    rec=$(latest_recorded)
+    latest_recorded >"$LATEST_FILE" || true
+    rec=$(tr -d '\r\n' < "$LATEST_FILE")
     rid=${rec%%|*}
     ip=${rec#*|}
     if [ -n "$rid" ] && [ "$rid" != "$before_rid" ]; then
