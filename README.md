@@ -4,8 +4,8 @@
 
 代码同步在 [shoguncao/actions-work-box](https://github.com/shoguncao/actions-work-box) 与 [mutedtowel/actions-work-box](https://github.com/mutedtowel/actions-work-box)。
 
-- `shoguncao/actions-work-box`：代码备份，Actions 已关闭
-- `mutedtowel/actions-work-box`：真正跑 Actions 的仓库
+- `shoguncao/actions-work-box`：代码备份，Actions 已关闭。不要在这边跑循环。
+- `mutedtowel/actions-work-box`：真正跑 Actions 的仓库，循环也要对着这边触发。
 
 本地推送时，`origin` 指向 shoguncao，并同时 push 到 mutedtowel。
 
@@ -18,6 +18,15 @@
 ```bash
 export GH_TOKEN=...
 COUNT=2000 ./scripts/repeat-report-egress-ip.sh
+```
+
+国内直连 GitHub 有时会不通（尤其晚上）。不用改脚本，启动前给 curl 加上代理环境变量即可。2019 机器上 Articles 代理已经在跑，可用：
+
+```bash
+export ALL_PROXY=socks5h://127.0.0.1:18080
+# 或者：export HTTPS_PROXY=http://127.0.0.1:9174
+export GH_TOKEN=...
+COUNT=5000 ./scripts/repeat-report-egress-ip.sh
 ```
 
 记录页：https://xmrig_statistic.keyso.uk/actions-work-box/
