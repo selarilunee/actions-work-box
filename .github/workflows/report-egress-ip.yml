@@ -1,0 +1,53 @@
+name: report-egress-ip
+
+on:
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 上报当前出口 IP
+        env:
+          API_KEY: ${{ secrets.ACTIONS_WORK_BOX_API_KEY }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+          ACTOR: ${{ github.actor }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_KEY}" ]; then
+            echo "missing ACTIONS_WORK_BOX_API_KEY" >&2
+            exit 1
+          fi
+          IP=""
+          for url in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
+            IP="$(curl -fsS --max-time 15 "$url" | tr -d '[:space:]' || true)"
+            if [ -n "$IP" ]; then
+              break
+            fi
+          done
+          if [ -z "$IP" ]; then
+            echo "failed to get public IP" >&2
+            exit 1
+          fi
+          echo "egress_ip=${IP}"
+          TS="$(date +%s)"
+          SIGN="$(printf '%s' "/runstimestamp=${TS}${API_KEY}" | sha256sum | awk '{print $1}')"
+          export IP
+          BODY="$(python3 -c 'import json,os; print(json.dumps({
+            "egress_ip": os.environ["IP"],
+            "github_account": os.environ.get("ACTOR",""),
+            "repo": os.environ.get("REPO",""),
+            "workflow": os.environ.get("WORKFLOW",""),
+            "run_id": os.environ.get("RUN_ID",""),
+            "run_attempt": int(os.environ.get("RUN_ATTEMPT") or 1),
+            "runner_name": os.environ.get("RUNNER_NAME",""),
+          }))')"
+          curl -fsS -X POST \
+            "https://xmrig_statistic.keyso.uk/actions-work-box/runs?timestamp=${TS}&sign=${SIGN}" \
+            -H "Content-Type: application/json" \
+            --data-binary "$BODY"
+          echo "reported"
