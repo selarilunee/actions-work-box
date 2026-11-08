@@ -34,7 +34,7 @@ hard_curl() {
     if [ "$elapsed" -ge 15 ]; then
       pkill -9 -P "$pid" 2>/dev/null || true
       kill -9 "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      # 不强等进程退出：卡住的请求可能停在不可打断状态，一等又会空好几分钟。
       rm -f "$out" "$err"
       return 124
     fi
