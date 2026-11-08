@@ -21,8 +21,13 @@ fi
 API="https://api.github.com/repos/${REPO}/actions"
 DISPATCH_BODY="/tmp/awb-dispatch.body"
 
+# curl 自己的 --max-time 有时拦不住卡住的请求（例如 DNS），再用 timeout 强杀。
+hard_curl() {
+  timeout -k 2 15 curl -sS --connect-timeout 8 --max-time 12 "$@"
+}
+
 auth_curl() {
-  curl -sS --connect-timeout 8 --max-time 12 \
+  hard_curl \
     -H "Authorization: Bearer ${GH_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -30,7 +35,7 @@ auth_curl() {
 }
 
 latest_recorded() {
-  curl -fsS --connect-timeout 8 --max-time 12 "$RECORD_API" \
+  hard_curl -f "$RECORD_API" \
     | python3 -c 'import json,sys
 try:
     d=json.load(sys.stdin)
@@ -46,7 +51,7 @@ except Exception:
 
 ok=0
 fail=0
-echo "$(date '+%F %T %Z') start COUNT=$COUNT REPO=$REPO wait=record-page" | tee -a "$LOG"
+echo "$(date '+%F %T %Z') start COUNT=$COUNT REPO=$REPO wait=record-page hard-timeout" | tee -a "$LOG"
 
 for i in $(seq 1 "$COUNT"); do
   now=$(date '+%F %T')
@@ -68,7 +73,11 @@ for i in $(seq 1 "$COUNT"); do
 
   rid=""
   ip=""
+  wait_start=$SECONDS
   for _ in $(seq 1 40); do
+    if [ $((SECONDS - wait_start)) -ge 90 ]; then
+      break
+    fi
     sleep 2
     rec=$(latest_recorded)
     rid=${rec%%|*}
