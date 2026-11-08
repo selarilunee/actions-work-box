@@ -21,9 +21,32 @@ fi
 API="https://api.github.com/repos/${REPO}/actions"
 DISPATCH_BODY="/tmp/awb-dispatch.body"
 
-# curl 自己的 --max-time 有时拦不住卡住的请求（例如 DNS），再用 timeout 强杀。
+# curl 自己的 --max-time，以及系统 timeout，在这台机器上都可能拦不住卡住的请求。
+# 改为后台启动 curl，超过 15 秒仍未结束就 kill -9 强杀。
 hard_curl() {
-  timeout -k 2 15 curl -sS --connect-timeout 8 --max-time 12 "$@"
+  local out err pid elapsed rc
+  out=$(mktemp)
+  err=$(mktemp)
+  curl -sS --connect-timeout 8 --max-time 12 "$@" >"$out" 2>"$err" &
+  pid=$!
+  elapsed=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$elapsed" -ge 15 ]; then
+      pkill -9 -P "$pid" 2>/dev/null || true
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      rm -f "$out" "$err"
+      return 124
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$pid"
+  rc=$?
+  cat "$out"
+  cat "$err" >&2
+  rm -f "$out" "$err"
+  return "$rc"
 }
 
 auth_curl() {
