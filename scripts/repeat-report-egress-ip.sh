@@ -21,7 +21,7 @@ if [ -z "${GH_TOKEN:-}" ]; then
 fi
 
 API="https://api.github.com/repos/${REPO}/actions"
-DISPATCH_BODY="/tmp/awb-dispatch.body"
+DISPATCH_BODY="${DISPATCH_BODY:-/tmp/awb-dispatch.body}"
 
 # curl 自己的 --max-time，以及系统 timeout，在这台机器上都可能拦不住卡住的请求。
 # 改为后台启动 curl，超过 15 秒仍未结束就 kill -9 强杀。
