@@ -1,0 +1,44 @@
+name: 手动临时 SSH
+
+# 仅手动触发。不读取仓库 secrets，也不把连接信息上传到 ix.io。
+# v4 没有可改写 SSH 命令的输入；连接命令由组件打在下一步日志里，本步说明如何补上私钥。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ssh:
+    name: 打开临时 SSH
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: 先看这里：如何登录
+        run: |
+          cat <<'EOF'
+          ========== 如何登录 ==========
+          本机先安装 cloudflared，并且终端里能直接运行 cloudflared。ProxyCommand 在你自己的电脑上执行。
+          私钥文件是 action-sshd-cloudflared，不是 action-sshd-cloudflared.pub。连接时用 -i /path/to/action-sshd-cloudflared。
+          下一步会一直等到 SSH 结束，这是正常的。请在下一步日志里找到英文这句：
+          Run the following command to connect:
+          它下面那一整行就是要复制的命令。该行以 ssh-keygen -R action-sshd-cloudflared 开头，中间的 https://....trycloudflare.com 是这次的随机隧道主机名。主机名以日志原文为准，不要改成别的地址。
+          组件打印的这一行里，最后一段是：
+          ssh -o ProxyCommand='cloudflared access tcp --hostname https://日志里的实际主机名.trycloudflare.com' runner@action-sshd-cloudflared
+          请整行复制，只在最后这个 ssh 和 -o 之间加上私钥参数，变成：
+          ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand='cloudflared access tcp --hostname https://日志里的实际主机名.trycloudflare.com' runner@action-sshd-cloudflared
+          前面的 ssh-keygen -R action-sshd-cloudflared，以及 echo 'action-sshd-cloudflared ssh-rsa ...' >> ~/.ssh/known_hosts，必须原样保留。这两段是在去掉旧主机公钥并写入这次的主机公钥，用来校验主机。
+          组件若另外打印带 UserKnownHostsFile=/dev/null 和 StrictHostKeyChecking=accept-new 的替代命令，那是不校验主机公钥的写法。要校验主机，就用上面这条写入 known_hosts 的整行，不要换成那条。
+          ========== 临时断开（还可以连回来） ==========
+          登录后会进入 tmux 会话 debug。临时离开时：先按 Ctrl-b，松开，再按 d。这是 detach。runner、隧道、sshd 和这个 tmux 会话都还在。
+          之后仍用刚才同一条命令重连（同一实际主机名，并且仍带 -i /path/to/action-sshd-cloudflared）。不要用 exit 做临时离开。
+          ========== 结束会话并让 workflow 收尾 ==========
+          在 tmux 里的 shell 执行 exit。这是最后一个 shell 时，tmux 会话结束，组件会关掉隧道和 SSH，这一步随之结束。exit 不是临时登出，结束后不能再连。
+          如果还开了别的窗口，在会话里执行 tmux kill-session -t debug，一次结束整个 debug 会话，组件同样会收尾。
+          如果 exit 或 tmux kill-session -t debug 之后这趟运行还在：打开 Actions 里的这次运行，点 Cancel workflow。这会无条件终止，不依赖 shell。取消、到点或 job 结束后，托管 runner 立即销毁，隧道地址作废。本 job 最长 360 分钟。
+          ========== 说明结束，请到下一步复制实际命令 ==========
+          EOF
+      - name: 启动 Cloudflare 临时隧道并等待连接
+        uses: valeriangalliat/action-sshd-cloudflared@69f78222a3a1a5b554316d3cfe60ca1ed9c809da # v4
+        env:
+          AUTHORIZED_KEYS: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJAguxLs9gGxxbPJPc4R0K5MHtq0xl2hNfBNXv4j20s8 action-sshd-cloudflared"
