@@ -23,7 +23,7 @@ jobs:
           {
             echo 'deb [trusted=yes] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
             sudo apt-get update -qq 2>/dev/null
-            sudo apt-get install -y cloudflared
+            sudo apt-get install -y cloudflared 2>/dev/null || { echo "cloudflared 安装失败" >&2; exit 1; }
           } >/dev/null
           cloudflared tunnel --no-autoupdate --url tcp://localhost:2222 > cloudflared.log 2>&1 &
           cf_pid=$!
