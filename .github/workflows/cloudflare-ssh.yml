@@ -1,8 +1,6 @@
 name: 手动临时 SSH
 
 # 仅手动触发。不读取仓库 secrets，也不上传 ix.io。
-# 直接执行 valeriangalliat/action-sshd-cloudflared@69f78222a3a1a5b554316d3cfe60ca1ed9c809da # v4 的 setup-ssh，
-# 用 sed -u 实时把 -i /path/to/action-sshd-cloudflared 插进组件打印的连接命令，边跑边出，不缓存。
 on:
   workflow_dispatch:
 
@@ -15,17 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - name: 打开临时 SSH
+      - name: SSH 登录；临时断开 Ctrl-b d；结束 tmux kill-session -t debug
+        uses: valeriangalliat/action-sshd-cloudflared@69f78222a3a1a5b554316d3cfe60ca1ed9c809da # v4
         env:
           AUTHORIZED_KEYS: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJAguxLs9gGxxbPJPc4R0K5MHtq0xl2hNfBNXv4j20s8 action-sshd-cloudflared"
-        run: |
-          set -euo pipefail
-          sha=69f78222a3a1a5b554316d3cfe60ca1ed9c809da
-          dir="${RUNNER_TEMP}/action-sshd-cloudflared-${sha}"
-          mkdir -p "$dir"
-          curl -fsSL "https://github.com/valeriangalliat/action-sshd-cloudflared/archive/${sha}.tar.gz" | tar -xz -C "$dir" --strip-components=1
-          chmod +x "$dir/setup-ssh"
-          echo "临时断开：Ctrl-b 然后 d"
-          echo "结束会话：tmux kill-session -t debug"
-          env GITHUB_ACTION_PATH="$dir" "$dir/setup-ssh" 2>&1 | sed -u \
-            -e "s| ssh -o ProxyCommand=| ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand=|"

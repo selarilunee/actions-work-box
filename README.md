@@ -33,9 +33,9 @@ COUNT=5000 ./scripts/repeat-report-egress-ip.sh
 
 ## 手动临时 SSH
 
-`.github/workflows/cloudflare-ssh.yml` 只能在 [mutedtowel](https://github.com/mutedtowel/actions-work-box/actions/workflows/cloudflare-ssh.yml) 上手动运行。不代替 `report-egress-ip`，也不挡住它。shoguncao 的 Actions 是关的。
+`.github/workflows/cloudflare-ssh.yml` 只能手动运行，直接 `uses` [action-sshd-cloudflared](https://github.com/valeriangalliat/action-sshd-cloudflared) v4。不代替 `report-egress-ip`，也不挡住它。shoguncao 的 Actions 是关的，要在能跑 Actions 的仓库上点 Run workflow。
 
-直接跑 `action-sshd-cloudflared` v4 的 `setup-ssh`，用 `sed -u` 实时把 `-i /path/to/action-sshd-cloudflared` 插进组件打印的连接命令，边跑边出。日志开头两行是 `Ctrl-b` 然后 `d` 临时断开、`tmux kill-session -t debug` 结束会话。私钥是 `action-sshd-cloudflared`，不是 `.pub`。最长 360 分钟。
+日志是组件自己的原文，比较长。在它打印的 `ssh -o ProxyCommand=...` 那一行里，`ssh` 后面加上 `-i /path/to/action-sshd-cloudflared`（私钥，不是 `.pub`），主机名和 `known_hosts` 那一段保持原样。临时断开：Ctrl-b 然后 d。结束会话：`tmux kill-session -t debug`。最长 360 分钟。
 
-没有实际跑过这条新日志，也没有做过 SSH 连通测试。
+没有实际跑过这条 workflow，也没有做过 SSH 连通测试。
 
