@@ -39,5 +39,6 @@ jobs:
           echo "隧道地址：$url"
           echo "本机需已安装 cloudflared，把私钥路径换成自己的后连接："
           echo "ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand='cloudflared access tcp --hostname $url' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null runner@github-actions"
-          echo "结束请在 Actions 里 Cancel workflow"
-          wait "$cf_pid"
+          echo "结束方式一（正常完成，绿色）：在 SSH 会话里执行 pkill -x cloudflared，连接会立即断开"
+          echo "结束方式二（取消，灰色）：在 Actions 页面 Cancel workflow"
+          wait "$cf_pid" || true
