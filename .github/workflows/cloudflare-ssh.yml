@@ -11,8 +11,7 @@ jobs:
       - name: 启动 sshd + Cloudflare Quick Tunnel
         run: |
           set -e
-          # 用触发者 GitHub 账号的公钥登录，无需配置 secrets
-          curl -fsSL "https://github.com/${GITHUB_ACTOR}.keys" > authorized_keys
+          printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJAguxLs9gGxxbPJPc4R0K5MHtq0xl2hNfBNXv4j20s8 action-sshd-cloudflared' > authorized_keys
           chmod 600 authorized_keys
           sudo ssh-keygen -A
           sudo mkdir -p /run/sshd
@@ -36,7 +35,7 @@ jobs:
           [ -n "$url" ] || { cat cloudflared.log >&2; exit 1; }
 
           echo "隧道地址：$url"
-          echo "本机需已安装 cloudflared，连接命令："
-          echo "ssh -o ProxyCommand='cloudflared access tcp --hostname $url' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null runner@github-actions"
+          echo "本机需已安装 cloudflared，把私钥路径换成自己的后连接："
+          echo "ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand='cloudflared access tcp --hostname $url' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null runner@github-actions"
           echo "结束请在 Actions 里 Cancel workflow"
           wait "$cf_pid"
