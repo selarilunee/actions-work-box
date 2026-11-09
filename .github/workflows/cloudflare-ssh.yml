@@ -20,10 +20,10 @@ jobs:
             -o PasswordAuthentication=no -D &
 
           # Quick Tunnel：无需账号/域名，日志里给出 *.trycloudflare.com
-          curl -fsSL -o cloudflared \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared
-          ./cloudflared tunnel --no-autoupdate --url tcp://localhost:2222 > cloudflared.log 2>&1 &
+          echo 'deb [trusted=yes] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y cloudflared
+          cloudflared tunnel --no-autoupdate --url tcp://localhost:2222 > cloudflared.log 2>&1 &
           cf_pid=$!
 
           url=""
