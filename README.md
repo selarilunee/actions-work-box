@@ -35,7 +35,7 @@ COUNT=5000 ./scripts/repeat-report-egress-ip.sh
 
 `.github/workflows/cloudflare-ssh.yml` 只能在 [mutedtowel](https://github.com/mutedtowel/actions-work-box/actions/workflows/cloudflare-ssh.yml) 上手动运行。不代替 `report-egress-ip`，也不挡住它。shoguncao 的 Actions 是关的。
 
-日志里只有三行：带当次隧道地址和主机公钥校验的完整 SSH 命令（把 `/path/to/action-sshd-cloudflared` 换成私钥，不要用 `.pub`）、`Ctrl-b` 然后 `d` 临时断开、`tmux kill-session -t debug` 结束会话。最长 360 分钟。
+直接跑 `action-sshd-cloudflared` v4 的 `setup-ssh`，用 `sed -u` 实时把 `-i /path/to/action-sshd-cloudflared` 插进组件打印的连接命令，边跑边出。日志开头两行是 `Ctrl-b` 然后 `d` 临时断开、`tmux kill-session -t debug` 结束会话。私钥是 `action-sshd-cloudflared`，不是 `.pub`。最长 360 分钟。
 
 没有实际跑过这条新日志，也没有做过 SSH 连通测试。
 

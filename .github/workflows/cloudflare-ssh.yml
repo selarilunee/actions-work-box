@@ -1,7 +1,8 @@
 name: 手动临时 SSH
 
 # 仅手动触发。不读取仓库 secrets，也不上传 ix.io。
-# 执行 valeriangalliat/action-sshd-cloudflared@69f78222a3a1a5b554316d3cfe60ca1ed9c809da # v4
+# 直接执行 valeriangalliat/action-sshd-cloudflared@69f78222a3a1a5b554316d3cfe60ca1ed9c809da # v4 的 setup-ssh，
+# 用 sed -u 实时把 -i /path/to/action-sshd-cloudflared 插进组件打印的连接命令，边跑边出，不缓存。
 on:
   workflow_dispatch:
 
@@ -24,47 +25,7 @@ jobs:
           mkdir -p "$dir"
           curl -fsSL "https://github.com/valeriangalliat/action-sshd-cloudflared/archive/${sha}.tar.gz" | tar -xz -C "$dir" --strip-components=1
           chmod +x "$dir/setup-ssh"
-          raw=$(mktemp)
-          py=$(mktemp)
-          cat > "$py" <<'PY'
-          import re
-          import sys
-
-          raw = open(sys.argv[1], "w", encoding="utf-8", errors="replace")
-          printed = False
-          pattern = re.compile(
-              r"ssh-keygen -R action-sshd-cloudflared && echo 'action-sshd-cloudflared (ssh-rsa \S+)' >> ~/.ssh/known_hosts && ssh -o ProxyCommand='cloudflared access tcp --hostname (https://\S+?\.trycloudflare\.com)' runner@action-sshd-cloudflared"
-          )
-          for line in sys.stdin:
-              raw.write(line)
-              raw.flush()
-              if printed:
-                  continue
-              match = pattern.search(line)
-              if not match:
-                  continue
-              key, url = match.group(1), match.group(2)
-              print(
-                  "ssh-keygen -R action-sshd-cloudflared && "
-                  f"echo 'action-sshd-cloudflared {key}' >> ~/.ssh/known_hosts && "
-                  "ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand="
-                  f"'cloudflared access tcp --hostname {url}' runner@action-sshd-cloudflared",
-                  flush=True,
-              )
-              print("临时断开：Ctrl-b 然后 d", flush=True)
-              print("结束会话：tmux kill-session -t debug", flush=True)
-              printed = True
-          raw.close()
-          if not printed:
-              sys.exit(1)
-          PY
-          set +e
-          set -o pipefail
-          stdbuf -oL -eL env GITHUB_ACTION_PATH="$dir" "$dir/setup-ssh" 2>&1 | python3 -u "$py" "$raw"
-          st=$?
-          set -e
-          if [ "$st" -ne 0 ]; then
-            echo "失败，退出码 ${st}" >&2
-            cat "$raw" >&2
-            exit "$st"
-          fi
+          echo "临时断开：Ctrl-b 然后 d"
+          echo "结束会话：tmux kill-session -t debug"
+          env GITHUB_ACTION_PATH="$dir" "$dir/setup-ssh" 2>&1 | sed -u \
+            -e "s| ssh -o ProxyCommand=| ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand=|"
