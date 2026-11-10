@@ -16,10 +16,14 @@ jobs:
   ssh:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    permissions:
+      statuses: write
     steps:
       - name: Start sshd + Cloudflare Quick Tunnel
         env:
           SSH_PUBKEY: ${{ inputs.ssh_pubkey }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           [ -n "$SSH_PUBKEY" ] || { echo "Error: ssh_pubkey is empty" >&2; exit 1; }
@@ -48,6 +52,14 @@ jobs:
           [ -n "$url" ] || { cat cloudflared.log >&2; exit 1; }
 
           echo "Tunnel URL: $url"
+          if [ -n "$CORRELATION_ID" ]; then
+            payload=$(python3 -c 'import json,sys; print(json.dumps({"state":"pending","context":"cloudflare-ssh/"+sys.argv[1],"description":sys.argv[2],"target_url":sys.argv[2]}))' "$CORRELATION_ID" "$url")
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -d "$payload" > /dev/null
+          fi
           echo "Install cloudflared locally, then replace the private key path in this command:"
           echo "ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand='cloudflared access tcp --hostname $url' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null runner@github-actions"
           echo "Finish (green): run pkill -x cloudflared in the SSH session; the connection drops immediately"

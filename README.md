@@ -46,14 +46,15 @@ COUNT=5000 ./scripts/repeat-report-egress-ip.sh
 
 ## 串行跑任务
 
-`scripts/run-on-runner.sh` 跑单轮：触发一次 workflow → 用关联标识精确锁定本轮 run → 从本轮 job 日志读到隧道地址 → SSH 上传任务目录 → 前台执行 `entry.sh` → 取回 `output/` → 关掉隧道并确认本轮 run 完成。
+`scripts/run-on-runner.sh` 跑单轮：触发一次 workflow → 用关联标识精确锁定本轮 run → 从本轮写下的 commit status 读到隧道地址 → SSH 上传任务目录 → 前台执行 `entry.sh` → 取回 `output/` → 关掉隧道并确认本轮 run 完成。
 
 `scripts/repeat-run-on-runner.sh` 是薄壳，按 `--count` 逐轮调用上面的单轮脚本，每轮返回后才可能开始下一轮，任一轮失败即停止。手动临时 SSH 的用法完全不受影响。
 
 ### 依赖与凭据
 
 - Bash 3.2 及以上；`curl`、`ssh`、`tar`、`python3`、本机 `cloudflared`。缺依赖会给中文提示，脚本不擅自安装。
-- PAT：对 shoguncao 仓库有 Actions 读写权限。放到**仓库外**的本机私有文件，例如 `~/.config/actions-work-box/pat.txt`（`chmod 600`），用 `--pat-file` 指定。不要把 PAT 写进仓库、命令行或日志。
+- PAT：对 shoguncao 仓库有 Actions 读写、以及 commit status 读取权限。放到**仓库外**的本机私有文件，例如 `~/.config/actions-work-box/pat.txt`（`chmod 600`），用 `--pat-file` 指定。不要把 PAT 写进仓库、命令行或日志。
+- workflow 用自带的 `GITHUB_TOKEN` 把隧道地址写成一条 commit status（`statuses: write` 已在 yml 里声明），不需要额外配置 secret。
 - SSH 私钥：单轮脚本用 `--ssh-key` 指定，公钥由它推导后作为 workflow 的 `ssh_pubkey` 输入传入；循环脚本在开头自动生成一对临时密钥，退出时删除，不需要传 `--ssh-key`。控制用 PAT 不会传给任务脚本。
 
 ### 任务目录
@@ -98,5 +99,5 @@ my-task/
 - 严格顺序：触发 → 等就绪 → 上传 → 执行并等待真实退出 → 下载输出 → 收尾并确认 completed → 单轮返回 → 下一轮。正常路径不会在业务仍运行时提前收尾。
 - 退出码：业务成功且上传、下载、收尾都成功返回 0；`entry.sh` 非零退出时仍尝试取回 `output/`，业务退出码如实返回；SSH 断连、下载失败、未在期限内完成都会让整体非零，日志分别记录业务结果与基础设施结果。
 - 异常与信号：只对已识别的本轮 run 尽力收尾，不会取消其它运行；dispatch 结果不确定时先按关联标识查状态，不盲目重发。
-- 连接地址取自「仍在运行」的 job 日志，GitHub 该接口可能有缓存或延迟；若迟迟读不到，脚本会在 `--startup-timeout` 后报错退出。
+- 连接地址由 workflow 在隧道就绪后写成一条 commit status（`context` 带本轮关联标识），本地脚本按关联标识精确匹配读取；运行中即可读到，不依赖 job 日志归档。若迟迟读不到，脚本会在 `--startup-timeout` 后报错退出。
 - 本轮 workflow 仍受 360 分钟上限约束，业务等待没有额外短超时。

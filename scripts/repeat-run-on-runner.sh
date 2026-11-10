@@ -19,6 +19,7 @@ EOF
 
 die()  { echo "错误：$*" >&2; usage >&2; exit 2; }
 fail() { echo "错误：$*" >&2; exit 1; }
+log()  { echo "[$(date '+%H:%M:%S')] $*"; }
 
 COUNT=""; REPO=""; REF=""; PAT_FILE=""; TASK_DIR=""; OUTPUT_DIR=""
 STARTUP_TIMEOUT=600; CLEANUP_TIMEOUT=180
@@ -47,13 +48,13 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/awb-repeat.XXXXXX") || fail "无法创建临时目录"
 trap 'rm -rf "$TMP_DIR"' EXIT
 ssh-keygen -q -t ed25519 -N '' -f "$TMP_DIR/id_ed25519" || fail "无法生成 SSH 密钥"
+log "临时 SSH 私钥：${TMP_DIR}/id_ed25519（脚本退出后删除）"
 
 # 数组传参，不用 eval，路径里的空格和特殊字符保持原样
 args=(--repo "$REPO" --ref "$REF" --pat-file "$PAT_FILE"
       --ssh-key "$TMP_DIR/id_ed25519"
       --task-dir "$TASK_DIR" --output-dir "$OUTPUT_DIR"
       --startup-timeout "$STARTUP_TIMEOUT" --cleanup-timeout "$CLEANUP_TIMEOUT")
-log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 i=1
 while [ "$i" -le "$COUNT" ]; do

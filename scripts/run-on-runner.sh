@@ -80,7 +80,7 @@ CURL_CFG="$TMP_DIR/curl.cfg"
 } > "$CURL_CFG"
 chmod 600 "$CURL_CFG"
 
-RUN_ID=""; JOB_ID=""; TUNNEL_URL=""
+RUN_ID=""; RUN_SHA=""; TUNNEL_URL=""
 
 # api 常在命令替换的子 shell 里跑，状态码必须写文件传回父 shell
 api() {
@@ -98,18 +98,31 @@ cancel_run() {
 }
 trap 'log "收到中断，取消本轮"; cancel_run; exit 130' INT TERM HUP
 
-# job 日志可能 302 到非 GitHub 主机，第二次请求绝不带 Authorization
-job_logs() {
-  local hdr="$TMP_DIR/hdr" body="$TMP_DIR/job" c loc
-  c=$(curl -sS --config "$CURL_CFG" -D "$hdr" -o "$body" -w '%{http_code}' \
-      "$API/repos/$REPO/actions/jobs/$JOB_ID/logs") || return 1
-  [ "$c" = 200 ] && { cat "$body"; return 0; }
-  case "$c" in
-    30*) loc=$(grep -i '^location:' "$hdr" | head -1 | sed 's/^[^:]*: *//' | tr -d '\r')
-         [ -n "$loc" ] && curl -fsSL --compressed --connect-timeout 10 --max-time 60 "$loc"
-         ;;
-    *) return 1 ;;
-  esac
+# 本轮 workflow 把隧道地址写成一条 commit status，运行中即可读取
+run_sha() {
+  local info
+  info=$(api "$API/repos/$REPO/actions/runs/$RUN_ID") || return 1
+  [ "$(http_code)" = 200 ] || return 1
+  printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("head_sha") or "")'
+}
+
+find_url() {
+  local statuses
+  statuses=$(api "$API/repos/$REPO/commits/$RUN_SHA/statuses?per_page=100") || return 1
+  [ "$(http_code)" = 200 ] || return 1
+  printf '%s' "$statuses" | python3 -c '
+import json, sys
+ctx = "cloudflare-ssh/" + sys.argv[1]
+try:
+    items = json.load(sys.stdin)
+except Exception:
+    items = []
+for s in items:
+    d = (s.get("description") or "").strip()
+    if s.get("context") == ctx and d.startswith("https://") and d.endswith(".trycloudflare.com"):
+        print(d)
+        break
+' "$CID"
 }
 
 # 按 run-name 里的关联标识精确匹配本轮 run，绝不取最新一条
@@ -127,21 +140,6 @@ except Exception:
 print("\n".join(str(r["id"]) for r in runs
                 if (r.get("display_title") or "").strip() == title))
 ' "$CID"
-}
-
-find_job() {
-  local jobs
-  jobs=$(api "$API/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=10") || return 1
-  [ "$(http_code)" = 200 ] || return 1
-  printf '%s' "$jobs" | python3 -c '
-import json, sys
-try:
-    jobs = json.load(sys.stdin).get("jobs") or []
-except Exception:
-    jobs = []
-if jobs:
-    print(jobs[0].get("id") or "")
-'
 }
 
 # ---------- 触发本轮 workflow ----------
@@ -169,13 +167,15 @@ done
 [ -n "$RUN_ID" ] || fail "${STARTUP_TIMEOUT}s 内未定位到本轮 run"
 log "本轮 run_id=$RUN_ID"
 
+RUN_SHA=$(run_sha) || RUN_SHA=""
+[ -n "$RUN_SHA" ] || { cancel_run; fail "无法取得本轮 commit sha"; }
+
 while [ "$SECONDS" -lt "$deadline" ]; do
-  [ -n "$JOB_ID" ] || JOB_ID=$(find_job) || JOB_ID=""
-  if [ -n "$JOB_ID" ]; then
-    logs=$(job_logs) || logs=""
-    url=$(printf '%s' "$logs" | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' | head -1 || true)
-    [ -n "$url" ] && { TUNNEL_URL=$url; break; }
-  fi
+  url=$(find_url) || url=""
+  [ -n "$url" ] && { TUNNEL_URL=$url; break; }
+  info=$(api "$API/repos/$REPO/actions/runs/$RUN_ID") || info=""
+  [ "$(http_code)" = 200 ] && printf '%s' "$info" | tr -d ' ' | grep -q '"status":"completed"' \
+    && { cancel_run; fail "本轮 run 已结束但未发布隧道地址"; }
   sleep 5
 done
 [ -n "$TUNNEL_URL" ] || { cancel_run; fail "${STARTUP_TIMEOUT}s 内未读到隧道地址"; }
