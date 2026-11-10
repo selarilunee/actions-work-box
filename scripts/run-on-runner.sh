@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# 单轮：触发一次临时 runner，上传任务目录、执行 entry.sh、取回 output，并确认本轮结束。
+set -u
+set -o pipefail
+
+usage() {
+  cat <<'EOF'
+用法：run-on-runner.sh --repo OWNER/REPO --ref BRANCH --pat-file FILE
+                       --ssh-key FILE --task-dir DIR --output-dir DIR
+                       [--startup-timeout SEC] [--cleanup-timeout SEC]
+
+每轮触发一次 cloudflare-ssh workflow，SSH 上传任务目录、前台执行 entry.sh、
+取回 output/，关闭隧道并确认本轮 run 完成。每轮目录独立，结果互不覆盖。
+
+必填：--repo --ref --pat-file --ssh-key --task-dir --output-dir
+可选：--startup-timeout（默认 600）--cleanup-timeout（默认 180）--help
+
+  --repo            owner/repo，需启用 Actions
+  --ref             触发用的分支或 ref
+  --pat-file        本机私有 PAT 文件，需 Actions 读写权限
+  --ssh-key         登录 runner 的 SSH 私钥；公钥由它推导后作为 input 传入
+  --task-dir        任务目录，需含 entry.sh
+  --output-dir      结果根目录，本轮结果在其 <关联标识> 子目录
+
+任务目录：entry.sh 前台执行，结果写入 output/；输入里已有的 output/ 不上传；
+output/ 为空属正常；依赖安装与后台任务 wait 由 entry.sh 自己负责。
+依赖：curl、ssh、tar、python3、cloudflared。兼容 macOS 自带 Bash 3.2。
+EOF
+}
+
+die()  { echo "错误：$*" >&2; usage >&2; exit 2; }   # 参数错误
+fail() { echo "错误：$*" >&2; exit 1; }               # 运行期错误
+
+REPO=""; REF=""; PAT_FILE=""; SSH_KEY=""; TASK_DIR=""; OUTPUT_DIR=""
+STARTUP_TIMEOUT=600; CLEANUP_TIMEOUT=180
+
+# 参数去掉 -- 后大写、连字符转下划线，正好就是上面的变量名
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help) usage; exit 0 ;;
+    --repo|--ref|--pat-file|--ssh-key|--task-dir|--output-dir|--startup-timeout|--cleanup-timeout)
+      [ $# -ge 2 ] || die "$1 缺少值"
+      name=$(printf '%s' "${1#--}" | tr 'a-z-' 'A-Z_')
+      printf -v "$name" '%s' "$2"
+      shift 2 ;;
+    *) die "未知参数 $1" ;;
+  esac
+done
+
+for v in REPO REF PAT_FILE SSH_KEY TASK_DIR OUTPUT_DIR; do
+  [ -n "${!v}" ] || die "缺少必填参数 $v"
+done
+for c in curl ssh tar python3 cloudflared; do
+  command -v "$c" >/dev/null 2>&1 || die "缺少依赖 $c"
+done
+[ -r "$PAT_FILE" ] || die "PAT 文件不可读"
+[ -r "$SSH_KEY" ] || die "SSH 私钥不可读"
+[ -r "$TASK_DIR/entry.sh" ] || die "任务目录缺少 entry.sh"
+mkdir -p "$OUTPUT_DIR" || die "无法创建结果目录"
+
+PAT=$(tr -d '\r\n' < "$PAT_FILE")
+[ -n "$PAT" ] || die "PAT 文件为空"
+case "$PAT" in *[!A-Za-z0-9_.-]*) die "PAT 含非法字符" ;; esac
+
+API="https://api.github.com"
+WORKFLOW="cloudflare-ssh.yml"
+SSH_TARGET="runner@github-actions"
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/awb-run.XXXXXX") || fail "无法创建临时目录"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+# 鉴权头放进 600 权限的配置文件，PAT 不出现在进程命令行或日志里
+CURL_CFG="$TMP_DIR/curl.cfg"
+{
+  printf 'header = "Authorization: Bearer %s"\n' "$PAT"
+  printf 'header = "Accept: application/vnd.github+json"\n'
+  printf 'connect-timeout = 10\n'
+  printf 'max-time = 40\n'
+} > "$CURL_CFG"
+chmod 600 "$CURL_CFG"
+
+RUN_ID=""; JOB_ID=""; TUNNEL_URL=""
+
+# api 常在命令替换的子 shell 里跑，状态码必须写文件传回父 shell
+api() {
+  local body="$TMP_DIR/body" c
+  : > "$TMP_DIR/code"
+  c=$(curl -sS --config "$CURL_CFG" -o "$body" -w '%{http_code}' "$@") || return 1
+  printf '%s' "$c" > "$TMP_DIR/code"
+  cat "$body"
+}
+http_code() { cat "$TMP_DIR/code"; }
+
+cancel_run() {
+  [ -n "$RUN_ID" ] && api -X POST "$API/repos/$REPO/actions/runs/$RUN_ID/cancel" >/dev/null 2>&1
+  return 0
+}
+trap 'log "收到中断，取消本轮"; cancel_run; exit 130' INT TERM HUP
+
+# job 日志可能 302 到非 GitHub 主机，第二次请求绝不带 Authorization
+job_logs() {
+  local hdr="$TMP_DIR/hdr" body="$TMP_DIR/job" c loc
+  c=$(curl -sS --config "$CURL_CFG" -D "$hdr" -o "$body" -w '%{http_code}' \
+      "$API/repos/$REPO/actions/jobs/$JOB_ID/logs") || return 1
+  [ "$c" = 200 ] && { cat "$body"; return 0; }
+  case "$c" in
+    30*) loc=$(grep -i '^location:' "$hdr" | head -1 | sed 's/^[^:]*: *//' | tr -d '\r')
+         [ -n "$loc" ] && curl -fsSL --compressed --connect-timeout 10 --max-time 60 "$loc"
+         ;;
+    *) return 1 ;;
+  esac
+}
+
+# 按 run-name 里的关联标识精确匹配本轮 run，绝不取最新一条
+find_run() {
+  local runs
+  runs=$(api "$API/repos/$REPO/actions/workflows/$WORKFLOW/runs?event=workflow_dispatch&per_page=50") || return 1
+  [ "$(http_code)" = 200 ] || return 1
+  printf '%s' "$runs" | python3 -c '
+import json, sys
+title = "cloudflare-ssh " + sys.argv[1]
+try:
+    runs = json.load(sys.stdin).get("workflow_runs", [])
+except Exception:
+    runs = []
+print("\n".join(str(r["id"]) for r in runs
+                if (r.get("display_title") or "").strip() == title))
+' "$CID"
+}
+
+find_job() {
+  local jobs
+  jobs=$(api "$API/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=10") || return 1
+  [ "$(http_code)" = 200 ] || return 1
+  printf '%s' "$jobs" | python3 -c '
+import json, sys
+try:
+    jobs = json.load(sys.stdin).get("jobs") or []
+except Exception:
+    jobs = []
+if jobs:
+    print(jobs[0].get("id") or "")
+'
+}
+
+# ---------- 触发本轮 workflow ----------
+CID="awb-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+SSH_PUBKEY=$(ssh-keygen -y -P '' -f "$SSH_KEY" 2>/dev/null) || fail "无法从私钥推导公钥"
+DISPATCH_BODY=$(python3 -c 'import json,sys; print(json.dumps({"ref":sys.argv[1],"inputs":{"correlation_id":sys.argv[2],"ssh_pubkey":sys.argv[3]}}))' "$REF" "$CID" "$SSH_PUBKEY")
+
+log "触发 workflow，关联标识=$CID"
+if ! resp=$(api -X POST -H "Content-Type: application/json" -d "$DISPATCH_BODY" \
+    "$API/repos/$REPO/actions/workflows/$WORKFLOW/dispatches"); then
+  log "dispatch 结果不确定，按标识查询，不重复触发"
+elif [ "$(http_code)" != 204 ]; then
+  fail "dispatch 失败，HTTP $(http_code)：$resp"
+fi
+
+# ---------- 锁定本轮 run，等隧道地址 ----------
+deadline=$((SECONDS + STARTUP_TIMEOUT))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  ids=$(find_run) || ids=""
+  n=$(printf '%s' "$ids" | grep -c '^[0-9]' || true)
+  [ "$n" -gt 1 ] && fail "关联标识匹配到多个 run，拒绝连接"
+  [ "$n" -eq 1 ] && { RUN_ID=$(printf '%s' "$ids" | head -1); break; }
+  sleep 3
+done
+[ -n "$RUN_ID" ] || fail "${STARTUP_TIMEOUT}s 内未定位到本轮 run"
+log "本轮 run_id=$RUN_ID"
+
+while [ "$SECONDS" -lt "$deadline" ]; do
+  [ -n "$JOB_ID" ] || JOB_ID=$(find_job) || JOB_ID=""
+  if [ -n "$JOB_ID" ]; then
+    logs=$(job_logs) || logs=""
+    url=$(printf '%s' "$logs" | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' | head -1 || true)
+    [ -n "$url" ] && { TUNNEL_URL=$url; break; }
+  fi
+  sleep 5
+done
+[ -n "$TUNNEL_URL" ] || { cancel_run; fail "${STARTUP_TIMEOUT}s 内未读到隧道地址"; }
+log "隧道地址：$TUNNEL_URL"
+
+# ---------- SSH 上传、执行、下载 ----------
+ssh_do() {
+  ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=30 \
+    -o "ProxyCommand=cloudflared access tcp --hostname $TUNNEL_URL" \
+    "$SSH_TARGET" "$@"
+}
+
+REMOTE_DIR="awb-task-$CID"
+RESULT_DIR="$OUTPUT_DIR/$CID"
+mkdir -p "$RESULT_DIR" || { cancel_run; fail "无法创建结果目录"; }
+
+up=1; biz=0; down=1; done_ok=0
+log "上传任务目录"
+tar --exclude='./output' -cf - -C "$TASK_DIR" . | \
+  ssh_do "rm -rf '$REMOTE_DIR' && mkdir -p '$REMOTE_DIR' && tar -xf - -C '$REMOTE_DIR'" || up=0
+[ "$up" -eq 1 ] || echo "错误：任务目录上传失败" >&2
+
+if [ "$up" -eq 1 ]; then
+  log "执行 entry.sh"
+  ssh_do "cd '$REMOTE_DIR' && mkdir -p output && bash entry.sh"
+  biz=$?
+  if [ "$biz" -eq 255 ]; then
+    echo "错误：SSH 连接异常（255）" >&2
+    biz=1
+  fi
+  log "业务退出码：$biz"
+
+  log "取回 output/"
+  ssh_do "cd '$REMOTE_DIR' && tar -cf - -C output ." | tar -xf - -C "$RESULT_DIR" || down=0
+  [ "$down" -eq 1 ] || echo "错误：结果下载失败" >&2
+fi
+
+# ---------- 收尾：关隧道让 wait 返回、job 绿色结束，再确认 completed ----------
+log "关闭隧道"
+ssh_do 'pkill -x cloudflared' >/dev/null 2>&1 || true
+
+deadline=$((SECONDS + CLEANUP_TIMEOUT))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  info=$(api "$API/repos/$REPO/actions/runs/$RUN_ID") || { sleep 3; continue; }
+  if [ "$(http_code)" = 200 ] && printf '%s' "$info" | tr -d ' ' | grep -q '"status":"completed"'; then
+    done_ok=1
+    break
+  fi
+  sleep 3
+done
+[ "$done_ok" -eq 1 ] || { echo "错误：${CLEANUP_TIMEOUT}s 内未完成" >&2; cancel_run; }
+
+# 基础设施任一失败则整体非零，否则如实返回业务退出码
+if [ "$up" -ne 1 ] || [ "$down" -ne 1 ] || [ "$done_ok" -ne 1 ]; then
+  rc=1
+else
+  rc=$biz
+fi
+log "本轮结束：业务=${biz}，上传=${up}，下载=${down}，收尾=${done_ok}，最终=${rc}"
+log "结果目录：$RESULT_DIR"
+exit "$rc"

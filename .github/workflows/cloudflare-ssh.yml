@@ -1,11 +1,16 @@
 name: cloudflare-ssh
 
+run-name: cloudflare-ssh ${{ inputs.correlation_id }}
+
 on:
   workflow_dispatch:
     inputs:
       ssh_pubkey:
         required: true
         type: string
+      correlation_id:
+        required: false
+        default: ''
 
 jobs:
   ssh:
