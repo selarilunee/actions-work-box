@@ -80,7 +80,7 @@ CURL_CFG="$TMP_DIR/curl.cfg"
 } > "$CURL_CFG"
 chmod 600 "$CURL_CFG"
 
-RUN_ID=""; RUN_SHA=""; TUNNEL_URL=""
+RUN_ID=""; TUNNEL_URL=""
 
 # api 常在命令替换的子 shell 里跑，状态码必须写文件传回父 shell
 api() {
@@ -98,17 +98,16 @@ cancel_run() {
 }
 trap 'log "收到中断，取消本轮"; cancel_run; exit 130' INT TERM HUP
 
-# 本轮 workflow 把隧道地址写成一条 commit status，运行中即可读取
-run_sha() {
+run_done() {
   local info
   info=$(api "$API/repos/$REPO/actions/runs/$RUN_ID") || return 1
-  [ "$(http_code)" = 200 ] || return 1
-  printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("head_sha") or "")'
+  [ "$(http_code)" = 200 ] && printf '%s' "$info" | tr -d ' ' | grep -q '"status":"completed"'
 }
 
+# 本轮 workflow 把隧道地址写成一条 commit status，运行中即可读取
 find_url() {
   local statuses
-  statuses=$(api "$API/repos/$REPO/commits/$RUN_SHA/statuses?per_page=100") || return 1
+  statuses=$(api "$API/repos/$REPO/commits/$REF/statuses?per_page=100") || return 1
   [ "$(http_code)" = 200 ] || return 1
   printf '%s' "$statuses" | python3 -c '
 import json, sys
@@ -155,30 +154,24 @@ elif [ "$(http_code)" != 204 ]; then
   fail "dispatch 失败，HTTP $(http_code)：$resp"
 fi
 
-# ---------- 锁定本轮 run，等隧道地址 ----------
+# ---------- 锁定本轮 run 并等隧道地址 ----------
 deadline=$((SECONDS + STARTUP_TIMEOUT))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  ids=$(find_run) || ids=""
-  n=$(printf '%s' "$ids" | grep -c '^[0-9]' || true)
-  [ "$n" -gt 1 ] && fail "关联标识匹配到多个 run，拒绝连接"
-  [ "$n" -eq 1 ] && { RUN_ID=$(printf '%s' "$ids" | head -1); break; }
+  if [ -z "$RUN_ID" ]; then
+    ids=$(find_run) || ids=""
+    n=$(printf '%s' "$ids" | grep -c '^[0-9]' || true)
+    [ "$n" -gt 1 ] && fail "关联标识匹配到多个 run，拒绝连接"
+    [ "$n" -eq 1 ] && RUN_ID=$(printf '%s' "$ids" | head -1)
+  fi
+  if [ -n "$RUN_ID" ]; then
+    TUNNEL_URL=$(find_url) || TUNNEL_URL=""
+    [ -n "$TUNNEL_URL" ] && break
+    run_done && { cancel_run; fail "本轮 run 已结束但未发布隧道地址"; }
+  fi
   sleep 3
 done
-[ -n "$RUN_ID" ] || fail "${STARTUP_TIMEOUT}s 内未定位到本轮 run"
-log "本轮 run_id=$RUN_ID"
-
-RUN_SHA=$(run_sha) || RUN_SHA=""
-[ -n "$RUN_SHA" ] || { cancel_run; fail "无法取得本轮 commit sha"; }
-
-while [ "$SECONDS" -lt "$deadline" ]; do
-  url=$(find_url) || url=""
-  [ -n "$url" ] && { TUNNEL_URL=$url; break; }
-  info=$(api "$API/repos/$REPO/actions/runs/$RUN_ID") || info=""
-  [ "$(http_code)" = 200 ] && printf '%s' "$info" | tr -d ' ' | grep -q '"status":"completed"' \
-    && { cancel_run; fail "本轮 run 已结束但未发布隧道地址"; }
-  sleep 5
-done
 [ -n "$TUNNEL_URL" ] || { cancel_run; fail "${STARTUP_TIMEOUT}s 内未读到隧道地址"; }
+log "本轮 run_id=$RUN_ID"
 log "隧道地址：$TUNNEL_URL"
 
 # ---------- SSH 上传、执行、下载 ----------
@@ -193,34 +186,35 @@ REMOTE_DIR="awb-task-$CID"
 RESULT_DIR="$OUTPUT_DIR/$CID"
 mkdir -p "$RESULT_DIR" || { cancel_run; fail "无法创建结果目录"; }
 
-up=0; biz=0; down=1; done_ok=0
-log "上传任务目录"
-# 新生成的 trycloudflare 子域 DNS 可能延迟生效，失败就重建目录重传
-for attempt in 1 2 3 4 5; do
-  if tar --exclude='./output' -cf - -C "$TASK_DIR" . | \
-      ssh_do "rm -rf '$REMOTE_DIR' && mkdir -p '$REMOTE_DIR' && tar -xf - -C '$REMOTE_DIR'"; then
-    up=1
-    break
-  fi
-  log "上传失败（第 ${attempt}/5 次），5 秒后重试"
-  sleep 5
+biz=0; down=1; done_ok=0
+# 新生成的 trycloudflare 子域 DNS 可能延迟生效，先等 SSH 真正连通再传
+log "等待隧道就绪"
+deadline=$((SECONDS + 90))
+until ssh_do true >/dev/null 2>&1; do
+  [ "$SECONDS" -lt "$deadline" ] || { cancel_run; fail "隧道域名 90s 内未生效"; }
+  dscacheutil -flushcache 2>/dev/null || true
+  sleep 3
 done
-[ "$up" -eq 1 ] || { cancel_run; fail "任务目录上传失败"; }
 
-if [ "$up" -eq 1 ]; then
-  log "执行 entry.sh"
-  ssh_do "cd '$REMOTE_DIR' && mkdir -p output && bash entry.sh"
-  biz=$?
-  if [ "$biz" -eq 255 ]; then
-    echo "错误：SSH 连接异常（255）" >&2
-    biz=1
-  fi
-  log "业务退出码：$biz"
-
-  log "取回 output/"
-  ssh_do "cd '$REMOTE_DIR' && tar -cf - -C output ." | tar -xf - -C "$RESULT_DIR" || down=0
-  [ "$down" -eq 1 ] || echo "错误：结果下载失败" >&2
+log "上传任务目录"
+if ! tar --exclude='./output' -cf - -C "$TASK_DIR" . | \
+    ssh_do "rm -rf '$REMOTE_DIR' && mkdir -p '$REMOTE_DIR' && tar -xf - -C '$REMOTE_DIR'"; then
+  cancel_run
+  fail "任务目录上传失败"
 fi
+
+log "执行 entry.sh"
+ssh_do "cd '$REMOTE_DIR' && mkdir -p output && bash entry.sh"
+biz=$?
+if [ "$biz" -eq 255 ]; then
+  echo "错误：SSH 连接异常（255）" >&2
+  biz=1
+fi
+log "业务退出码：$biz"
+
+log "取回 output/"
+ssh_do "cd '$REMOTE_DIR' && tar -cf - -C output ." | tar -xf - -C "$RESULT_DIR" || down=0
+[ "$down" -eq 1 ] || echo "错误：结果下载失败" >&2
 
 # ---------- 收尾：关隧道让 wait 返回、job 绿色结束，再确认 completed ----------
 log "关闭隧道"
@@ -228,21 +222,17 @@ ssh_do 'pkill -x cloudflared' >/dev/null 2>&1 || true
 
 deadline=$((SECONDS + CLEANUP_TIMEOUT))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  info=$(api "$API/repos/$REPO/actions/runs/$RUN_ID") || { sleep 3; continue; }
-  if [ "$(http_code)" = 200 ] && printf '%s' "$info" | tr -d ' ' | grep -q '"status":"completed"'; then
-    done_ok=1
-    break
-  fi
+  run_done && { done_ok=1; break; }
   sleep 3
 done
 [ "$done_ok" -eq 1 ] || { echo "错误：${CLEANUP_TIMEOUT}s 内未完成" >&2; cancel_run; }
 
-# 基础设施任一失败则整体非零，否则如实返回业务退出码
-if [ "$up" -ne 1 ] || [ "$down" -ne 1 ] || [ "$done_ok" -ne 1 ]; then
+# 下载或收尾失败则整体非零，否则如实返回业务退出码
+if [ "$down" -ne 1 ] || [ "$done_ok" -ne 1 ]; then
   rc=1
 else
   rc=$biz
 fi
-log "本轮结束：业务=${biz}，上传=${up}，下载=${down}，收尾=${done_ok}，最终=${rc}"
+log "本轮结束：业务=${biz}，下载=${down}，收尾=${done_ok}，最终=${rc}"
 log "结果目录：$RESULT_DIR"
 exit "$rc"
