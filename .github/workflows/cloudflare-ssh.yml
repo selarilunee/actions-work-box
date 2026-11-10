@@ -2,16 +2,23 @@ name: cloudflare-ssh
 
 on:
   workflow_dispatch:
+    inputs:
+      ssh_pubkey:
+        required: true
+        type: string
 
 jobs:
   ssh:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - name: 启动 sshd + Cloudflare Quick Tunnel
+      - name: Start sshd + Cloudflare Quick Tunnel
+        env:
+          SSH_PUBKEY: ${{ inputs.ssh_pubkey }}
         run: |
           set -e
-          printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJAguxLs9gGxxbPJPc4R0K5MHtq0xl2hNfBNXv4j20s8 action-sshd-cloudflared' > authorized_keys
+          [ -n "$SSH_PUBKEY" ] || { echo "Error: ssh_pubkey is empty" >&2; exit 1; }
+          printf '%s\n' "$SSH_PUBKEY" > authorized_keys
           chmod 600 authorized_keys
           sudo ssh-keygen -A
           sudo mkdir -p /run/sshd
@@ -19,11 +26,10 @@ jobs:
             -o "AuthorizedKeysFile=$PWD/authorized_keys" \
             -o PasswordAuthentication=no -D &
 
-          # Quick Tunnel：无需账号/域名，日志里给出 *.trycloudflare.com
           {
             echo 'deb [trusted=yes] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
             sudo apt-get update -qq 2>/dev/null
-            sudo apt-get install -y cloudflared 2>/dev/null || { echo "cloudflared 安装失败" >&2; exit 1; }
+            sudo apt-get install -y cloudflared 2>/dev/null || { echo "cloudflared installation failed" >&2; exit 1; }
           } >/dev/null
           cloudflared tunnel --no-autoupdate --url tcp://localhost:2222 > cloudflared.log 2>&1 &
           cf_pid=$!
@@ -36,9 +42,9 @@ jobs:
           done
           [ -n "$url" ] || { cat cloudflared.log >&2; exit 1; }
 
-          echo "隧道地址：$url"
-          echo "本机需已安装 cloudflared，把私钥路径换成自己的后连接："
+          echo "Tunnel URL: $url"
+          echo "Install cloudflared locally, then replace the private key path in this command:"
           echo "ssh -i /path/to/action-sshd-cloudflared -o ProxyCommand='cloudflared access tcp --hostname $url' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null runner@github-actions"
-          echo "结束方式一（正常完成，绿色）：在 SSH 会话里执行 pkill -x cloudflared，连接会立即断开"
-          echo "结束方式二（取消，灰色）：在 Actions 页面 Cancel workflow"
+          echo "Finish (green): run pkill -x cloudflared in the SSH session; the connection drops immediately"
+          echo "Finish (gray): Cancel workflow from the Actions page"
           wait "$cf_pid" || true
