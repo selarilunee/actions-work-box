@@ -193,11 +193,19 @@ REMOTE_DIR="awb-task-$CID"
 RESULT_DIR="$OUTPUT_DIR/$CID"
 mkdir -p "$RESULT_DIR" || { cancel_run; fail "无法创建结果目录"; }
 
-up=1; biz=0; down=1; done_ok=0
+up=0; biz=0; down=1; done_ok=0
 log "上传任务目录"
-tar --exclude='./output' -cf - -C "$TASK_DIR" . | \
-  ssh_do "rm -rf '$REMOTE_DIR' && mkdir -p '$REMOTE_DIR' && tar -xf - -C '$REMOTE_DIR'" || up=0
-[ "$up" -eq 1 ] || echo "错误：任务目录上传失败" >&2
+# 新生成的 trycloudflare 子域 DNS 可能延迟生效，失败就重建目录重传
+for attempt in 1 2 3 4 5; do
+  if tar --exclude='./output' -cf - -C "$TASK_DIR" . | \
+      ssh_do "rm -rf '$REMOTE_DIR' && mkdir -p '$REMOTE_DIR' && tar -xf - -C '$REMOTE_DIR'"; then
+    up=1
+    break
+  fi
+  log "上传失败（第 ${attempt}/5 次），5 秒后重试"
+  sleep 5
+done
+[ "$up" -eq 1 ] || { cancel_run; fail "任务目录上传失败"; }
 
 if [ "$up" -eq 1 ]; then
   log "执行 entry.sh"
