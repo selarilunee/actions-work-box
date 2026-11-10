@@ -187,12 +187,20 @@ RESULT_DIR="$OUTPUT_DIR/$CID"
 mkdir -p "$RESULT_DIR" || { cancel_run; fail "无法创建结果目录"; }
 
 biz=0; down=1; done_ok=0
-# 新生成的 trycloudflare 子域 DNS 可能延迟生效，先等 SSH 真正连通再传
+# 先等权威 DNS 登记好新域名，本机再去查；否则内网 DNS 会记下 NXDOMAIN 负缓存，卡约 60 秒
+host=${TUNNEL_URL#https://}
+deadline=$((SECONDS + 60))
+until curl -fsS --max-time 6 -H 'accept: application/dns-json' \
+    "https://cloudflare-dns.com/dns-query?name=$host&type=A" |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(a.get("type")==1 for a in d.get("Answer",[])) else 1)' 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] || { cancel_run; fail "域名 60s 内未生效"; }
+  sleep 2
+done
+
 log "等待隧道就绪"
 deadline=$((SECONDS + 90))
 until ssh_do true >/dev/null 2>&1; do
   [ "$SECONDS" -lt "$deadline" ] || { cancel_run; fail "隧道域名 90s 内未生效"; }
-  dscacheutil -flushcache 2>/dev/null || true
   sleep 3
 done
 

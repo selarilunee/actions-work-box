@@ -53,7 +53,7 @@ jobs:
 
           echo "Tunnel URL: $url"
           if [ -n "$CORRELATION_ID" ]; then
-            payload=$(python3 -c 'import json,sys; print(json.dumps({"state":"pending","context":"cloudflare-ssh/"+sys.argv[1],"description":sys.argv[2],"target_url":sys.argv[2]}))' "$CORRELATION_ID" "$url")
+            payload=$(python3 -c 'import json,sys; print(json.dumps({"state":"pending","context":"cloudflare-ssh/"+sys.argv[1],"description":sys.argv[2]}))' "$CORRELATION_ID" "$url")
             curl -fsS -X POST \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
